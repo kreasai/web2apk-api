@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { corsHeaders } from '@/lib/cors';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const BUILDER_REPO_URL = process.env.BUILDER_REPO_URL || '';
@@ -25,6 +26,10 @@ function splitRepo(repo: string) {
   return { owner, name };
 }
 
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
+
 export async function GET(req: Request, { params }: { params: Promise<{ jobId: string }> }) {
   try {
     const { jobId } = await params;
@@ -34,7 +39,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
     const signed = url.searchParams.get('signed') !== 'false';
 
     if (!userId) {
-      return NextResponse.json({ error: 'userId is required' }, { status: 400 });
+      return NextResponse.json({ error: 'userId is required' }, { status: 400, headers: corsHeaders() });
     }
 
     const admin = createAdminClient();
@@ -46,17 +51,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
       .single();
 
     if (jobError || !job) {
-      return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Job not found' }, { status: 404, headers: corsHeaders() });
     }
 
     if (job.status !== 'success' && job.status !== 'waiting_external') {
-      return NextResponse.json({ error: 'Artifact not ready' }, { status: 400 });
+      return NextResponse.json({ error: 'Artifact not ready' }, { status: 400, headers: corsHeaders() });
     }
 
     if (job.expires_at) {
       const expired = Date.now() > new Date(job.expires_at).getTime();
       if (expired) {
-        return NextResponse.json({ error: 'Download link expired' }, { status: 410 });
+        return NextResponse.json({ error: 'Download link expired' }, { status: 410, headers: corsHeaders() });
       }
     }
 
@@ -65,7 +70,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
     const artifactName = fileType === 'aab' ? selectedMeta.artifact_name_aab : selectedMeta.artifact_name;
 
     if (!runId || !artifactName) {
-      return NextResponse.json({ error: 'Artifact metadata missing' }, { status: 400 });
+      return NextResponse.json({ error: 'Artifact metadata missing' }, { status: 400, headers: corsHeaders() });
     }
 
     const repo = signed ? SIGNER_REPO_URL : BUILDER_REPO_URL;
@@ -73,7 +78,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
       return NextResponse.json({
         error: 'GitHub download env not configured',
         artifact: { runId, artifactName, signed },
-      }, { status: 500 });
+      }, { status: 500, headers: corsHeaders() });
     }
 
     const { owner, name } = splitRepo(repo);
@@ -87,7 +92,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
 
     if (!listRes.ok) {
       const text = await listRes.text();
-      return NextResponse.json({ error: `Failed to list artifacts: ${text}` }, { status: 500 });
+      return NextResponse.json({ error: `Failed to list artifacts: ${text}` }, { status: 500, headers: corsHeaders() });
     }
 
     const listData = (await listRes.json()) as {
@@ -96,7 +101,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
     const artifact = listData.artifacts?.find((a) => a.name === artifactName);
 
     if (!artifact) {
-      return NextResponse.json({ error: 'Artifact not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Artifact not found' }, { status: 404, headers: corsHeaders() });
     }
 
     const downloadRes = await fetch(artifact.archive_download_url, {
@@ -108,18 +113,26 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
 
     if (!downloadRes.ok || !downloadRes.body) {
       const text = await downloadRes.text();
-      return NextResponse.json({ error: `Failed to download artifact: ${text}` }, { status: 500 });
+      return NextResponse.json({ error: `Failed to download artifact: ${text}` }, { status: 500, headers: corsHeaders() });
     }
 
-    return new NextResponse(downloadRes.body, {
+    const res = new NextResponse(downloadRes.body, {
       headers: {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${artifactName}.zip"`,
         'Cache-Control': 'private, no-store, max-age=0',
       },
     });
+    
+    // Add CORS headers to the stream response
+    const headers = corsHeaders();
+    for (const [key, value] of Object.entries(headers)) {
+      res.headers.set(key, value);
+    }
+    
+    return res;
   } catch (error) {
     console.error('Download endpoint error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders() });
   }
 }

@@ -1,11 +1,17 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient, getPricingMap } from '@/lib/supabase/admin';
 import { applyInternalCreditCharge } from '@/lib/billing/credits';
+import { corsHeaders } from '@/lib/cors';
+
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
 
 export async function POST(req: Request) {
   try {
-    // Dipanggil oleh curl dari GitHub Actions Runner (builder-public / signer-private)
-    const token = req.headers.get('X-WEB2APK-CALLBACK-TOKEN');
+    const token =
+      req.headers.get('X-WEB2APK-CALLBACK-TOKEN') ||
+      req.headers.get('x-web2apk-callback-token');
     
     // Validasi token keamanan (opsional tapi sangat disarankan)
     const expectedToken = process.env.WEB2APK_CALLBACK_TOKEN;
@@ -13,17 +19,33 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const body = await req.json();
-    const { 
-      job_id, 
-      status, 
-      stage, 
-      progress, 
-      error_message, 
-      github_run_id,
-      artifact_name,
-      artifact_name_aab,
-    } = body;
+    const rawBody = await req.text();
+    let body: Record<string, unknown> = {};
+
+    try {
+      body = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
+    } catch {
+      const repaired = rawBody.replace(
+        /"job_id"\s*:\s*([0-9a-fA-F-]{36})/,
+        '"job_id":"$1"',
+      );
+      try {
+        body = repaired ? (JSON.parse(repaired) as Record<string, unknown>) : {};
+      } catch {
+        return NextResponse.json({ error: 'Invalid callback payload' }, { status: 400 });
+      }
+    }
+    const job_id = typeof body.job_id === 'string' ? body.job_id : '';
+    const status = typeof body.status === 'string' ? body.status : '';
+    const stage = typeof body.stage === 'string' ? body.stage : '';
+    const progress = typeof body.progress === 'number' ? body.progress : Number(body.progress ?? 0);
+    const error_message = typeof body.error_message === 'string' ? body.error_message : '';
+    const github_run_id =
+      typeof body.github_run_id === 'number' || typeof body.github_run_id === 'string'
+        ? Number(body.github_run_id)
+        : null;
+    const artifact_name = typeof body.artifact_name === 'string' ? body.artifact_name : '';
+    const artifact_name_aab = typeof body.artifact_name_aab === 'string' ? body.artifact_name_aab : '';
 
     if (!job_id || !status) {
       return NextResponse.json({ error: 'Invalid payload' }, { status: 400 });
@@ -41,10 +63,10 @@ export async function POST(req: Request) {
     }
 
     const pricing = await getPricingMap();
-    const buildCreditCost = pricing.get('build_credit_cost') ?? 100;
-    const signCreditSurcharge = pricing.get('sign_credit_surcharge') ?? 50;
+    const buildCreditCost = pricing.get('build_credit_cost') ?? 1000;
+    const signCreditSurcharge = pricing.get('sign_credit_surcharge') ?? 1500;
 
-    const nextMessage = error_message || `Stage ${stage}: ${status}`;
+    const nextMessage = error_message || `Stage ${stage || 'unknown'}: ${status}`;
 
     const nextUpdate: {
       status: string;
