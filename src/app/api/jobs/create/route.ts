@@ -5,7 +5,33 @@ import { corsHeaders } from '@/lib/cors';
 const BUILDER_REPO_URL = process.env.BUILDER_REPO_URL || '';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const BUILDER_WORKFLOW_FILE = process.env.BUILDER_WORKFLOW_FILE || 'android-build.yml';
+const BUILDER_WORKFLOW_REF = process.env.BUILDER_WORKFLOW_REF || 'main';
 const WEB2APK_CALLBACK_TOKEN = process.env.WEB2APK_CALLBACK_TOKEN || '';
+
+function normalizeRepoSlug(value: string) {
+  const raw = value.trim().replace(/\.git$/, '');
+  if (!raw) return '';
+
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    try {
+      const url = new URL(raw);
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        return `${parts[0]}/${parts[1]}`;
+      }
+      return '';
+    } catch {
+      return '';
+    }
+  }
+
+  const parts = raw.split('/').filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  }
+
+  return '';
+}
 
 function resolveCallbackUrl(req: Request) {
   const configured = process.env.WEB2APK_CALLBACK_URL;
@@ -256,9 +282,10 @@ export async function POST(req: Request) {
     const jobId = insertedJob.id;
     const callbackUrl = resolveCallbackUrl(req);
 
-    const dispatchUrl = `https://api.github.com/repos/${BUILDER_REPO_URL}/actions/workflows/${BUILDER_WORKFLOW_FILE}/dispatches`;
+    const builderRepoSlug = normalizeRepoSlug(BUILDER_REPO_URL);
+    const dispatchUrl = `https://api.github.com/repos/${builderRepoSlug}/actions/workflows/${BUILDER_WORKFLOW_FILE}/dispatches`;
     
-    if (BUILDER_REPO_URL && GITHUB_TOKEN) {
+    if (builderRepoSlug && GITHUB_TOKEN) {
       const baseInputs = {
         job_id: jobId,
         source_type: effectiveSourceType,
@@ -281,12 +308,12 @@ export async function POST(req: Request) {
           Authorization: `token ${GITHUB_TOKEN}`,
         },
         body: JSON.stringify({
-          ref: 'main',
-          inputs: {
-            ...baseInputs,
-            callback_url: callbackUrl,
-            callback_token: WEB2APK_CALLBACK_TOKEN,
-          },
+            ref: BUILDER_WORKFLOW_REF,
+            inputs: {
+              ...baseInputs,
+              callback_url: callbackUrl,
+              callback_token: WEB2APK_CALLBACK_TOKEN,
+            },
         }),
       });
 
@@ -298,19 +325,31 @@ export async function POST(req: Request) {
             Authorization: `token ${GITHUB_TOKEN}`,
           },
           body: JSON.stringify({
-            ref: 'main',
-            inputs: baseInputs,
-          }),
-        });
+              ref: BUILDER_WORKFLOW_REF,
+              inputs: baseInputs,
+            }),
+          });
       }
 
       if (!response.ok) {
         const text = await response.text();
+        let reason = text;
+        try {
+          const parsed = JSON.parse(text) as { message?: string; errors?: Array<{ message?: string }> };
+          const detailMessages = parsed.errors?.map((item) => item.message).filter(Boolean).join(' | ');
+          reason = [parsed.message, detailMessages].filter(Boolean).join(' | ') || text;
+        } catch {
+          reason = text;
+        }
+
         await admin
           .from('jobs')
-          .update({ status: 'failed', message: `Dispatch failed: ${text}` })
+          .update({ status: 'failed', message: `Dispatch failed: ${reason}` })
           .eq('id', jobId);
-        return NextResponse.json({ error: 'Failed to trigger builder workflow' }, { status: 500, headers: corsHeaders() });
+        return NextResponse.json(
+          { error: `Failed to trigger builder workflow: ${reason}` },
+          { status: 500, headers: corsHeaders() },
+        );
       }
     }
 
