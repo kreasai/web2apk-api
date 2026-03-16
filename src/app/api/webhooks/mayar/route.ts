@@ -111,7 +111,6 @@ async function insertWebhookLog(input: WebhookLogInput) {
 export async function POST(req: Request) {
   try {
     const rawBody = await req.text();
-    const requestUrl = new URL(req.url);
     let bodyUnknown: unknown = {};
     try {
       bodyUnknown = rawBody ? JSON.parse(rawBody) : {};
@@ -160,60 +159,59 @@ export async function POST(req: Request) {
 
     let signatureValid: boolean | null = null;
 
-    if (MAYAR_WEBHOOK_SECRET) {
-      const queryToken =
-        requestUrl.searchParams.get('token') ||
-        requestUrl.searchParams.get('webhook_token') ||
-        requestUrl.searchParams.get('signature') ||
-        '';
-
-      if (queryToken && safeEqualString(queryToken.trim(), MAYAR_WEBHOOK_SECRET.trim())) {
-        signatureValid = true;
-      }
-
-      if (signatureValid !== true) {
-      const incomingSignature =
-        req.headers.get('x-mayar-signature') ||
-        req.headers.get('x-signature') ||
-        req.headers.get('signature') ||
-        req.headers.get('x-webhook-signature') ||
-        req.headers.get('x-callback-signature') ||
-        req.headers.get('x-mayar-hmac') ||
-        req.headers.get('x-webhook-token') ||
-        req.headers.get('x-mayar-token') ||
-        req.headers.get('authorization') ||
-        '';
-
-      if (!incomingSignature) {
-        signatureValid = false;
-        await insertWebhookLog({
-          invoiceId: primaryInvoiceId,
-          eventName: event,
-          eventStatus: statusFromPayload,
-          signatureValid,
-          processingResult: 'signature_missing',
-          errorMessage: 'Missing webhook signature/token',
-          payload: body,
-        });
-        return NextResponse.json({ error: 'Missing webhook signature/token' }, { status: 401 });
-      }
-
-      if (!verifyWebhookSignature(rawBody, MAYAR_WEBHOOK_SECRET, incomingSignature)) {
-        signatureValid = false;
-        await insertWebhookLog({
-          invoiceId: primaryInvoiceId,
-          eventName: event,
-          eventStatus: statusFromPayload,
-          signatureValid,
-          processingResult: 'signature_invalid',
-          errorMessage: 'Invalid webhook signature',
-          payload: body,
-        });
-        return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
-      }
-      signatureValid = true;
-      }
+    if (!MAYAR_WEBHOOK_SECRET.trim()) {
+      await insertWebhookLog({
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid: null,
+        processingResult: 'webhook_secret_missing',
+        errorMessage: 'Webhook secret is not configured',
+        payload: body,
+      });
+      return NextResponse.json({ error: 'Webhook secret is not configured' }, { status: 500 });
     }
+
+    const incomingSignature =
+      req.headers.get('x-mayar-signature') ||
+      req.headers.get('x-signature') ||
+      req.headers.get('signature') ||
+      req.headers.get('x-webhook-signature') ||
+      req.headers.get('x-callback-signature') ||
+      req.headers.get('x-mayar-hmac') ||
+      req.headers.get('x-webhook-token') ||
+      req.headers.get('x-mayar-token') ||
+      req.headers.get('authorization') ||
+      '';
+
+    if (!incomingSignature) {
+      signatureValid = false;
+      await insertWebhookLog({
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'signature_missing',
+        errorMessage: 'Missing webhook signature',
+        payload: body,
+      });
+      return NextResponse.json({ error: 'Missing webhook signature' }, { status: 401 });
+    }
+
+    if (!verifyWebhookSignature(rawBody, MAYAR_WEBHOOK_SECRET, incomingSignature)) {
+      signatureValid = false;
+      await insertWebhookLog({
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'signature_invalid',
+        errorMessage: 'Invalid webhook signature',
+        payload: body,
+      });
+      return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
+    }
+    signatureValid = true;
 
     if (!shouldProcessAsPaid(event, statusFromPayload)) {
       await insertWebhookLog({
