@@ -111,6 +111,7 @@ async function insertWebhookLog(input: WebhookLogInput) {
 export async function POST(req: Request) {
   try {
     const rawBody = await req.text();
+    const requestUrl = new URL(req.url);
     let bodyUnknown: unknown = {};
     try {
       bodyUnknown = rawBody ? JSON.parse(rawBody) : {};
@@ -160,6 +161,17 @@ export async function POST(req: Request) {
     let signatureValid: boolean | null = null;
 
     if (MAYAR_WEBHOOK_SECRET) {
+      const queryToken =
+        requestUrl.searchParams.get('token') ||
+        requestUrl.searchParams.get('webhook_token') ||
+        requestUrl.searchParams.get('signature') ||
+        '';
+
+      if (queryToken && safeEqualString(queryToken.trim(), MAYAR_WEBHOOK_SECRET.trim())) {
+        signatureValid = true;
+      }
+
+      if (signatureValid !== true) {
       const incomingSignature =
         req.headers.get('x-mayar-signature') ||
         req.headers.get('x-signature') ||
@@ -180,10 +192,10 @@ export async function POST(req: Request) {
           eventStatus: statusFromPayload,
           signatureValid,
           processingResult: 'signature_missing',
-          errorMessage: 'Missing webhook signature',
+          errorMessage: 'Missing webhook signature/token',
           payload: body,
         });
-        return NextResponse.json({ error: 'Missing webhook signature' }, { status: 401 });
+        return NextResponse.json({ error: 'Missing webhook signature/token' }, { status: 401 });
       }
 
       if (!verifyWebhookSignature(rawBody, MAYAR_WEBHOOK_SECRET, incomingSignature)) {
@@ -200,6 +212,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
       }
       signatureValid = true;
+      }
     }
 
     if (!shouldProcessAsPaid(event, statusFromPayload)) {
@@ -237,6 +250,7 @@ export async function POST(req: Request) {
     let tx:
       | {
           id: string;
+          invoice_id: string;
           user_id: string;
           credits_added: number;
           status: 'unpaid' | 'paid' | 'expired' | 'closed';
@@ -247,7 +261,7 @@ export async function POST(req: Request) {
     for (const idCandidate of idCandidates) {
       const { data: txByInvoice } = await admin
         .from('transactions')
-        .select('id,user_id,credits_added,status,payment_method')
+        .select('id,invoice_id,user_id,credits_added,status,payment_method')
         .eq('invoice_id', idCandidate)
         .maybeSingle();
       if (txByInvoice) {
@@ -266,7 +280,7 @@ export async function POST(req: Request) {
       if (profile?.id) {
         const { data: fallbackCandidates } = await admin
           .from('transactions')
-          .select('id,user_id,credits_added,status,payment_method,created_at')
+          .select('id,invoice_id,user_id,credits_added,status,payment_method,created_at')
           .eq('user_id', profile.id)
           .eq('status', 'unpaid')
           .eq('amount', Math.floor(amountFromWebhook))
@@ -309,6 +323,8 @@ export async function POST(req: Request) {
       });
       return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
     }
+
+    const resolvedInvoiceId = tx.invoice_id || primaryInvoiceId;
 
     let resolvedStatus: 'unpaid' | 'paid' | 'expired' | 'closed' = 'paid';
     let amountPaid = Number.isFinite(amountFromWebhook) && amountFromWebhook > 0 ? Math.floor(amountFromWebhook) : null;
@@ -360,7 +376,7 @@ export async function POST(req: Request) {
         .eq('id', tx.id);
       await insertWebhookLog({
         transactionId: tx.id,
-        invoiceId: primaryInvoiceId,
+        invoiceId: resolvedInvoiceId,
         eventName: event,
         eventStatus: statusFromPayload,
         signatureValid,
@@ -374,7 +390,7 @@ export async function POST(req: Request) {
     if (tx.status === 'paid') {
       await insertWebhookLog({
         transactionId: tx.id,
-        invoiceId: primaryInvoiceId,
+        invoiceId: resolvedInvoiceId,
         eventName: event,
         eventStatus: statusFromPayload,
         signatureValid,
@@ -395,7 +411,7 @@ export async function POST(req: Request) {
     if (updateTxError) {
       await insertWebhookLog({
         transactionId: tx.id,
-        invoiceId: primaryInvoiceId,
+        invoiceId: resolvedInvoiceId,
         eventName: event,
         eventStatus: statusFromPayload,
         signatureValid,
@@ -409,7 +425,7 @@ export async function POST(req: Request) {
     if (!updatedRows || updatedRows.length === 0) {
       await insertWebhookLog({
         transactionId: tx.id,
-        invoiceId: primaryInvoiceId,
+        invoiceId: resolvedInvoiceId,
         eventName: event,
         eventStatus: statusFromPayload,
         signatureValid,
@@ -440,7 +456,7 @@ export async function POST(req: Request) {
 
     await insertWebhookLog({
       transactionId: tx.id,
-      invoiceId: primaryInvoiceId,
+      invoiceId: resolvedInvoiceId,
       eventName: event,
       eventStatus: statusFromPayload,
       signatureValid,
