@@ -3,6 +3,33 @@ import { createAdminClient, getPricingMap } from '@/lib/supabase/admin';
 import { applyInternalCreditCharge } from '@/lib/billing/credits';
 import { corsHeaders } from '@/lib/cors';
 
+function buildStatusMessage(stageRaw: string, status: string, fallbackError: string) {
+  if (fallbackError) return fallbackError;
+
+  const stage = stageRaw.trim().toLowerCase();
+  if (stage === 'builder') {
+    if (status === 'running') return 'Builder sedang memproses APK...';
+    if (status === 'success') return 'Builder selesai membuat artifact APK/AAB.';
+    if (status === 'failed') return 'Builder gagal memproses APK.';
+    return `Builder: ${status}`;
+  }
+
+  if (stage === 'signer') {
+    if (status === 'running') return 'Signer sedang menandatangani artifact...';
+    if (status === 'success') return 'Signer selesai menandatangani artifact.';
+    if (status === 'failed') return 'Signer gagal menandatangani artifact.';
+    return `Signer: ${status}`;
+  }
+
+  if (status === 'queued') return 'Job masuk antrian build.';
+  if (status === 'running') return 'Job sedang diproses.';
+  if (status === 'waiting_external') return 'Menunggu proses eksternal (builder/signer).';
+  if (status === 'success') return 'Job berhasil diselesaikan.';
+  if (status === 'failed') return 'Job gagal diproses.';
+
+  return `Status update: ${status}`;
+}
+
 export async function OPTIONS() {
   return NextResponse.json({}, { headers: corsHeaders() });
 }
@@ -66,7 +93,7 @@ export async function POST(req: Request) {
     const buildCreditCost = pricing.get('build_credit_cost') ?? 1000;
     const signCreditSurcharge = pricing.get('sign_credit_surcharge') ?? 1500;
 
-    const nextMessage = error_message || `Stage ${stage || 'unknown'}: ${status}`;
+    const nextMessage = buildStatusMessage(stage, status, error_message);
 
     const nextUpdate: {
       status: string;

@@ -133,6 +133,8 @@ export async function POST(req: Request) {
     const effectivePackageName = packageName || existingApp?.package_name;
     const effectiveSourceType = sourceType ?? (sourceZip ? 'zip' : sourceUrl ? 'url' : undefined);
     const effectiveSourcePath = sourceZip || sourceUrl;
+    const templateSourceType = effectiveSourceType === 'url' ? 'url' : null;
+    const templateSourcePath = effectiveSourceType === 'url' ? effectiveSourcePath : null;
     const effectiveVersionName = versionName ?? existingApp?.last_version_name ?? '1.0.0';
     const effectiveVersionCode = versionCode ?? existingApp?.last_version_code ?? 1;
     const effectivePermissions = permissions ?? existingApp?.base_permissions ?? {};
@@ -185,6 +187,7 @@ export async function POST(req: Request) {
           ...(splashPath !== undefined ? { splash_path: splashPath } : {}),
           ...(splashUrl !== undefined ? { splash_url: splashUrl } : {}),
           ...(splashBackgroundColor !== undefined ? { splash_background_color: splashBackgroundColor } : {}),
+          ...(templateSourceType ? { source_type: templateSourceType, source_path: templateSourcePath } : {}),
           base_permissions: effectivePermissions,
           base_features: effectiveFeatures,
           last_version_name: effectiveVersionName,
@@ -214,6 +217,8 @@ export async function POST(req: Request) {
           user_id: userId,
           name: effectiveAppName,
           package_name: effectivePackageName,
+          source_type: templateSourceType,
+          source_path: templateSourcePath,
           icon_path: iconPath ?? null,
           icon_url: iconUrl ?? null,
           splash_path: splashPath ?? null,
@@ -255,10 +260,10 @@ export async function POST(req: Request) {
         source_type: effectiveSourceType,
         source_path: effectiveSourcePath,
         permissions: effectivePermissions,
-         features: effectiveJobFeatures,
-         status: 'queued',
-         message: 'Job queued',
-       })
+        features: effectiveJobFeatures,
+        status: 'queued',
+        message: 'Job queued',
+      })
       .select('id')
       .single();
 

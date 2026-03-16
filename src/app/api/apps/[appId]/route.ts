@@ -22,7 +22,7 @@ export async function GET(req: Request, context: { params: Promise<{ appId: stri
     const admin = createAdminClient();
     const { data, error } = await admin
       .from('apps')
-      .select('id,user_id,name,package_name,icon_path,icon_url,splash_path,splash_url,splash_background_color,base_permissions,base_features,last_version_name,last_version_code,created_at,updated_at')
+      .select('id,user_id,name,package_name,source_type,source_path,icon_path,icon_url,splash_path,splash_url,splash_background_color,base_permissions,base_features,last_version_name,last_version_code,created_at,updated_at')
       .eq('id', appId)
       .eq('user_id', userId)
       .single();
@@ -64,6 +64,8 @@ export async function PATCH(req: Request, context: { params: Promise<{ appId: st
       baseFeatures,
       lastVersionName,
       lastVersionCode,
+      sourceType,
+      sourcePath,
     } = body as {
       userId?: string;
       name?: string;
@@ -77,6 +79,8 @@ export async function PATCH(req: Request, context: { params: Promise<{ appId: st
       baseFeatures?: Record<string, boolean>;
       lastVersionName?: string;
       lastVersionCode?: number;
+      sourceType?: 'url' | 'zip' | null;
+      sourcePath?: string | null;
     };
 
     if (!userId) {
@@ -95,6 +99,10 @@ export async function PATCH(req: Request, context: { params: Promise<{ appId: st
     if (baseFeatures !== undefined) updates.base_features = baseFeatures;
     if (lastVersionName !== undefined) updates.last_version_name = lastVersionName;
     if (lastVersionCode !== undefined) updates.last_version_code = lastVersionCode;
+    if (sourceType !== undefined) {
+      updates.source_type = sourceType === 'url' ? 'url' : null;
+      updates.source_path = sourceType === 'url' ? sourcePath ?? null : null;
+    }
 
     const admin = createAdminClient();
     const { data, error } = await admin
@@ -102,7 +110,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ appId: st
       .update(updates)
       .eq('id', appId)
       .eq('user_id', userId)
-      .select('id,user_id,name,package_name,icon_path,icon_url,splash_path,splash_url,splash_background_color,base_permissions,base_features,last_version_name,last_version_code,created_at,updated_at')
+      .select('id,user_id,name,package_name,source_type,source_path,icon_path,icon_url,splash_path,splash_url,splash_background_color,base_permissions,base_features,last_version_name,last_version_code,created_at,updated_at')
       .single();
 
     if (isMissingAppsTableError(error?.message)) {
