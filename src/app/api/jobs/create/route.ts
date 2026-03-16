@@ -164,6 +164,12 @@ export async function POST(req: Request) {
     const effectiveIconPath = iconPath ?? existingApp?.icon_path ?? null;
     const effectiveSplashPath = splashPath ?? existingApp?.splash_path ?? null;
     const effectiveSplashBackgroundColor = splashBackgroundColor ?? existingApp?.splash_background_color ?? '#0B1220';
+    const effectiveJobFeatures = {
+      ...effectiveFeatures,
+      splash_background_color: effectiveSplashBackgroundColor,
+      __icon_path: effectiveIconPath ?? '',
+      __splash_path: effectiveSplashPath ?? '',
+    };
 
     if (!effectiveAppName || !effectivePackageName || !effectiveSourceType || !effectiveSourcePath) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400, headers: corsHeaders() });
@@ -268,10 +274,10 @@ export async function POST(req: Request) {
         source_type: effectiveSourceType,
         source_path: effectiveSourcePath,
         permissions: effectivePermissions,
-        features: effectiveFeatures,
-        status: 'queued',
-        message: 'Job queued',
-      })
+         features: effectiveJobFeatures,
+         status: 'queued',
+         message: 'Job queued',
+       })
       .select('id')
       .single();
 
@@ -296,7 +302,7 @@ export async function POST(req: Request) {
         version_name: effectiveVersionName,
         version_code: String(effectiveVersionCode),
         permissions: JSON.stringify(effectivePermissions),
-        features: JSON.stringify({ ...effectiveFeatures, splash_background_color: effectiveSplashBackgroundColor }),
+        features: JSON.stringify(effectiveJobFeatures),
         icon_path: effectiveIconPath ?? '',
         splash_path: effectiveSplashPath ?? '',
       };
