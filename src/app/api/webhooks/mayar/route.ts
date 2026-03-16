@@ -65,6 +65,7 @@ function verifyWebhookSignature(rawBody: string, secret: string, signatureHeader
   const normalizedIncoming = trimmed
     .replace(/^sha256=/i, '')
     .replace(/^bearer\s+/i, '')
+    .replace(/^token\s+/i, '')
     .trim();
 
   if (normalizedIncoming && safeEqualString(normalizedIncoming, secret.trim())) {
@@ -89,6 +90,16 @@ function verifyWebhookSignature(rawBody: string, secret: string, signatureHeader
   const incomingBase64Buf = Buffer.from(normalizedIncoming);
   const expectedBase64Buf = Buffer.from(expectedBase64);
   return safeEqualBuffer(incomingBase64Buf, expectedBase64Buf);
+}
+
+function pickHeader(req: Request, candidates: string[]) {
+  for (const key of candidates) {
+    const value = req.headers.get(key);
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return '';
 }
 
 async function insertWebhookLog(input: WebhookLogInput) {
@@ -172,17 +183,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Webhook secret is not configured' }, { status: 500 });
     }
 
-    const incomingSignature =
-      req.headers.get('x-mayar-signature') ||
-      req.headers.get('x-signature') ||
-      req.headers.get('signature') ||
-      req.headers.get('x-webhook-signature') ||
-      req.headers.get('x-callback-signature') ||
-      req.headers.get('x-mayar-hmac') ||
-      req.headers.get('x-webhook-token') ||
-      req.headers.get('x-mayar-token') ||
-      req.headers.get('authorization') ||
-      '';
+    const incomingSignature = pickHeader(req, [
+      'x-mayar-signature',
+      'x-mayar-token',
+      'x-webhook-token',
+      'x-callback-token',
+      'webhook-token',
+      'mayar-token',
+      'x-signature',
+      'signature',
+      'x-webhook-signature',
+      'x-callback-signature',
+      'mayar-signature',
+      'webhook-signature',
+      'x-mayar-hmac',
+      'authorization',
+    ]);
 
     if (!incomingSignature) {
       signatureValid = false;
