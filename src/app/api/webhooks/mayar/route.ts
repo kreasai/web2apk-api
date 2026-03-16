@@ -8,6 +8,17 @@ const MAYAR_BASE_URL =
   (process.env.NODE_ENV === 'production' ? 'https://api.mayar.id/hl/v1' : 'https://api.mayar.club/hl/v1');
 const MAYAR_WEBHOOK_SECRET = process.env.MAYAR_WEBHOOK_SECRET || '';
 
+type WebhookLogInput = {
+  transactionId?: string | null;
+  invoiceId?: string | null;
+  eventName: string;
+  eventStatus: string;
+  signatureValid: boolean | null;
+  processingResult: string;
+  errorMessage?: string | null;
+  payload: Record<string, unknown>;
+};
+
 function normalizeEvent(value: unknown) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
@@ -43,8 +54,23 @@ function safeEqualBuffer(a: Buffer, b: Buffer) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+function safeEqualString(a: string, b: string) {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  return safeEqualBuffer(aBuf, bBuf);
+}
+
 function verifyWebhookSignature(rawBody: string, secret: string, signatureHeader: string) {
-  const normalizedIncoming = signatureHeader.replace(/^sha256=/i, '').trim();
+  const trimmed = signatureHeader.trim();
+  const normalizedIncoming = trimmed
+    .replace(/^sha256=/i, '')
+    .replace(/^bearer\s+/i, '')
+    .trim();
+
+  if (normalizedIncoming && safeEqualString(normalizedIncoming, secret.trim())) {
+    return true;
+  }
+
   const digest = createHmac('sha256', secret).update(rawBody).digest();
   const expectedHex = digest.toString('hex');
   const expectedBase64 = digest.toString('base64');
@@ -65,45 +91,40 @@ function verifyWebhookSignature(rawBody: string, secret: string, signatureHeader
   return safeEqualBuffer(incomingBase64Buf, expectedBase64Buf);
 }
 
+async function insertWebhookLog(input: WebhookLogInput) {
+  const admin = createAdminClient();
+  await admin.from('transaction_webhook_logs').insert({
+    transaction_id: input.transactionId ?? null,
+    invoice_id: input.invoiceId ?? null,
+    provider: 'mayar',
+    event_name: input.eventName || null,
+    event_status: input.eventStatus || null,
+    signature_valid: input.signatureValid,
+    processing_result: input.processingResult,
+    error_message: input.errorMessage ?? null,
+    payload: input.payload,
+    processed_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const rawBody = await req.text();
-
-    if (MAYAR_WEBHOOK_SECRET) {
-      const incomingSignature =
-        req.headers.get('x-mayar-signature') ||
-        req.headers.get('x-signature') ||
-        req.headers.get('signature') ||
-        req.headers.get('x-webhook-signature') ||
-        req.headers.get('x-callback-signature') ||
-        req.headers.get('x-mayar-hmac') ||
-        '';
-
-      if (!incomingSignature) {
-        return NextResponse.json({ error: 'Missing webhook signature' }, { status: 401 });
-      }
-
-      if (!verifyWebhookSignature(rawBody, MAYAR_WEBHOOK_SECRET, incomingSignature)) {
-        return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
-      }
+    let bodyUnknown: unknown = {};
+    try {
+      bodyUnknown = rawBody ? JSON.parse(rawBody) : {};
+    } catch {
+      bodyUnknown = {};
     }
-
-    const bodyUnknown = rawBody ? JSON.parse(rawBody) : {};
     const body = typeof bodyUnknown === 'object' && bodyUnknown !== null
       ? (bodyUnknown as Record<string, unknown>)
       : {};
     const event = normalizeEvent(body.event ?? body.type);
-
     const data = typeof body.data === 'object' && body.data !== null
       ? (body.data as Record<string, unknown>)
       : {};
     const statusFromPayload = normalizeStatus(data.status ?? body.status);
-
-    if (!shouldProcessAsPaid(event, statusFromPayload)) {
-      return NextResponse.json({ message: 'Event ignored', event, status: statusFromPayload });
-    }
-
-    const admin = createAdminClient();
 
     const idCandidates = [
       data.id,
@@ -134,6 +155,67 @@ export async function POST(req: Request) {
         : null,
     ]
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    const primaryInvoiceId = idCandidates[0] ?? null;
+
+    let signatureValid: boolean | null = null;
+
+    if (MAYAR_WEBHOOK_SECRET) {
+      const incomingSignature =
+        req.headers.get('x-mayar-signature') ||
+        req.headers.get('x-signature') ||
+        req.headers.get('signature') ||
+        req.headers.get('x-webhook-signature') ||
+        req.headers.get('x-callback-signature') ||
+        req.headers.get('x-mayar-hmac') ||
+        req.headers.get('x-webhook-token') ||
+        req.headers.get('x-mayar-token') ||
+        req.headers.get('authorization') ||
+        '';
+
+      if (!incomingSignature) {
+        signatureValid = false;
+        await insertWebhookLog({
+          invoiceId: primaryInvoiceId,
+          eventName: event,
+          eventStatus: statusFromPayload,
+          signatureValid,
+          processingResult: 'signature_missing',
+          errorMessage: 'Missing webhook signature',
+          payload: body,
+        });
+        return NextResponse.json({ error: 'Missing webhook signature' }, { status: 401 });
+      }
+
+      if (!verifyWebhookSignature(rawBody, MAYAR_WEBHOOK_SECRET, incomingSignature)) {
+        signatureValid = false;
+        await insertWebhookLog({
+          invoiceId: primaryInvoiceId,
+          eventName: event,
+          eventStatus: statusFromPayload,
+          signatureValid,
+          processingResult: 'signature_invalid',
+          errorMessage: 'Invalid webhook signature',
+          payload: body,
+        });
+        return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
+      }
+      signatureValid = true;
+    }
+
+    if (!shouldProcessAsPaid(event, statusFromPayload)) {
+      await insertWebhookLog({
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'event_ignored',
+        errorMessage: 'Event ignored',
+        payload: body,
+      });
+      return NextResponse.json({ message: 'Event ignored', event, status: statusFromPayload });
+    }
+
+    const admin = createAdminClient();
 
     const amountFromWebhook = Number(
       typeof data.amount === 'number' || typeof data.amount === 'string'
@@ -216,6 +298,15 @@ export async function POST(req: Request) {
     }
 
     if (!tx) {
+      await insertWebhookLog({
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'transaction_not_found',
+        errorMessage: 'Transaction not found',
+        payload: body,
+      });
       return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
     }
 
@@ -267,10 +358,30 @@ export async function POST(req: Request) {
         .from('transactions')
         .update({ status: resolvedStatus, updated_at: new Date().toISOString() })
         .eq('id', tx.id);
+      await insertWebhookLog({
+        transactionId: tx.id,
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: `invoice_${resolvedStatus}`,
+        errorMessage: null,
+        payload: body,
+      });
       return NextResponse.json({ success: true, message: `Invoice ${resolvedStatus}` });
     }
 
     if (tx.status === 'paid') {
+      await insertWebhookLog({
+        transactionId: tx.id,
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'already_processed',
+        errorMessage: null,
+        payload: body,
+      });
       return NextResponse.json({ success: true, message: 'Already processed' });
     }
 
@@ -282,10 +393,30 @@ export async function POST(req: Request) {
       .select('id');
 
     if (updateTxError) {
+      await insertWebhookLog({
+        transactionId: tx.id,
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'transaction_update_error',
+        errorMessage: updateTxError.message,
+        payload: body,
+      });
       return NextResponse.json({ error: updateTxError.message }, { status: 500 });
     }
 
     if (!updatedRows || updatedRows.length === 0) {
+      await insertWebhookLog({
+        transactionId: tx.id,
+        invoiceId: primaryInvoiceId,
+        eventName: event,
+        eventStatus: statusFromPayload,
+        signatureValid,
+        processingResult: 'already_processed',
+        errorMessage: null,
+        payload: body,
+      });
       return NextResponse.json({ success: true, message: 'Already processed' });
     }
 
@@ -307,10 +438,30 @@ export async function POST(req: Request) {
         .eq('id', tx.user_id);
     }
 
+    await insertWebhookLog({
+      transactionId: tx.id,
+      invoiceId: primaryInvoiceId,
+      eventName: event,
+      eventStatus: statusFromPayload,
+      signatureValid,
+      processingResult: 'webhook_processed',
+      errorMessage: null,
+      payload: body,
+    });
+
     return NextResponse.json({ success: true, message: 'Webhook processed' });
 
   } catch (error) {
     console.error('Webhook processing error:', error);
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    await insertWebhookLog({
+      eventName: 'unknown',
+      eventStatus: 'error',
+      signatureValid: null,
+      processingResult: 'internal_error',
+      errorMessage: message,
+      payload: {},
+    });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
