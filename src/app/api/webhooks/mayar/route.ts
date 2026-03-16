@@ -39,6 +39,32 @@ function shouldProcessAsPaid(event: string, status: string) {
   return false;
 }
 
+function safeEqualBuffer(a: Buffer, b: Buffer) {
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function verifyWebhookSignature(rawBody: string, secret: string, signatureHeader: string) {
+  const normalizedIncoming = signatureHeader.replace(/^sha256=/i, '').trim();
+  const digest = createHmac('sha256', secret).update(rawBody).digest();
+  const expectedHex = digest.toString('hex');
+  const expectedBase64 = digest.toString('base64');
+
+  const incomingHexCandidate = normalizedIncoming.toLowerCase();
+  const isHex = /^[0-9a-f]+$/i.test(incomingHexCandidate);
+
+  if (isHex) {
+    const incomingHexBuf = Buffer.from(incomingHexCandidate, 'hex');
+    const expectedHexBuf = Buffer.from(expectedHex, 'hex');
+    if (safeEqualBuffer(incomingHexBuf, expectedHexBuf)) {
+      return true;
+    }
+  }
+
+  const incomingBase64Buf = Buffer.from(normalizedIncoming);
+  const expectedBase64Buf = Buffer.from(expectedBase64);
+  return safeEqualBuffer(incomingBase64Buf, expectedBase64Buf);
+}
+
 export async function POST(req: Request) {
   try {
     const rawBody = await req.text();
@@ -48,18 +74,16 @@ export async function POST(req: Request) {
         req.headers.get('x-mayar-signature') ||
         req.headers.get('x-signature') ||
         req.headers.get('signature') ||
+        req.headers.get('x-webhook-signature') ||
+        req.headers.get('x-callback-signature') ||
+        req.headers.get('x-mayar-hmac') ||
         '';
 
       if (!incomingSignature) {
         return NextResponse.json({ error: 'Missing webhook signature' }, { status: 401 });
       }
 
-      const normalizedIncoming = incomingSignature.replace(/^sha256=/i, '').trim();
-      const expected = createHmac('sha256', MAYAR_WEBHOOK_SECRET).update(rawBody).digest('hex');
-      const incomingBuf = Buffer.from(normalizedIncoming, 'hex');
-      const expectedBuf = Buffer.from(expected, 'hex');
-
-      if (incomingBuf.length !== expectedBuf.length || !timingSafeEqual(incomingBuf, expectedBuf)) {
+      if (!verifyWebhookSignature(rawBody, MAYAR_WEBHOOK_SECRET, incomingSignature)) {
         return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
       }
     }
@@ -171,19 +195,21 @@ export async function POST(req: Request) {
         if (fallbackCandidates && fallbackCandidates.length === 1) {
           tx = fallbackCandidates[0];
         } else if (fallbackCandidates && fallbackCandidates.length > 1) {
-          const mayarCreditOnly = fallbackCandidates.every((candidate) => candidate.payment_method === 'mayar_credit');
+          const sortedCandidates = [...fallbackCandidates].sort((a, b) => {
+            return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          });
 
-          if (mayarCreditOnly) {
-            tx = fallbackCandidates[0];
-            const staleIds = fallbackCandidates.slice(1).map((candidate) => candidate.id);
-            if (staleIds.length > 0) {
-              await admin
-                .from('transactions')
-                .update({ status: 'expired', updated_at: new Date().toISOString() })
-                .in('id', staleIds);
-            }
-          } else {
-            return NextResponse.json({ error: 'Ambiguous transaction match' }, { status: 409 });
+          tx = sortedCandidates.find((candidate) => candidate.payment_method === 'mayar_credit') ?? sortedCandidates[0];
+
+          const staleIds = sortedCandidates
+            .filter((candidate) => candidate.id !== tx?.id)
+            .map((candidate) => candidate.id);
+
+          if (staleIds.length > 0) {
+            await admin
+              .from('transactions')
+              .update({ status: 'expired', updated_at: new Date().toISOString() })
+              .in('id', staleIds);
           }
         }
       }
