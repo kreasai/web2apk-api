@@ -8,6 +8,37 @@ const MAYAR_BASE_URL =
   (process.env.NODE_ENV === 'production' ? 'https://api.mayar.id/hl/v1' : 'https://api.mayar.club/hl/v1');
 const MAYAR_WEBHOOK_SECRET = process.env.MAYAR_WEBHOOK_SECRET || '';
 
+function normalizeEvent(value: unknown) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function normalizeStatus(value: unknown) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function shouldProcessAsPaid(event: string, status: string) {
+  const paidEventAliases = new Set([
+    'payment.received',
+    'payment.paid',
+    'payment.success',
+    'invoice.paid',
+    'invoice.payment_received',
+    'checkout.paid',
+    'payment_link.paid',
+    'payment-link.paid',
+  ]);
+
+  if (paidEventAliases.has(event)) {
+    return true;
+  }
+
+  if (!event && ['paid', 'success', 'settled', 'completed'].includes(status)) {
+    return true;
+  }
+
+  return false;
+}
+
 export async function POST(req: Request) {
   try {
     const rawBody = await req.text();
@@ -37,15 +68,17 @@ export async function POST(req: Request) {
     const body = typeof bodyUnknown === 'object' && bodyUnknown !== null
       ? (bodyUnknown as Record<string, unknown>)
       : {};
-    const event = typeof body.event === 'string' ? body.event : '';
-
-    if (event !== 'payment.received') {
-      return NextResponse.json({ message: 'Event ignored' });
-    }
+    const event = normalizeEvent(body.event ?? body.type);
 
     const data = typeof body.data === 'object' && body.data !== null
       ? (body.data as Record<string, unknown>)
       : {};
+    const statusFromPayload = normalizeStatus(data.status ?? body.status);
+
+    if (!shouldProcessAsPaid(event, statusFromPayload)) {
+      return NextResponse.json({ message: 'Event ignored', event, status: statusFromPayload });
+    }
+
     const admin = createAdminClient();
 
     const idCandidates = [
@@ -53,11 +86,27 @@ export async function POST(req: Request) {
       data.invoiceId,
       data.paymentLinkId,
       data.paymentId,
+      data.invoice_id,
+      data.invoice_number,
+      data.externalId,
+      data.external_id,
+      data.referenceId,
+      data.reference_id,
+      data.orderId,
+      data.order_id,
+      data.transactionId,
+      data.transaction_id,
       typeof data.invoice === 'object' && data.invoice !== null
         ? (data.invoice as Record<string, unknown>).id
         : null,
       typeof data.paymentLink === 'object' && data.paymentLink !== null
         ? (data.paymentLink as Record<string, unknown>).id
+        : null,
+      typeof data.invoice === 'object' && data.invoice !== null
+        ? (data.invoice as Record<string, unknown>).invoiceId
+        : null,
+      typeof data.payment === 'object' && data.payment !== null
+        ? (data.payment as Record<string, unknown>).id
         : null,
     ]
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
@@ -73,7 +122,11 @@ export async function POST(req: Request) {
       (typeof data.customerEmail === 'string' && data.customerEmail) ||
       (typeof data.email === 'string' && data.email) ||
       (typeof data.customer_email === 'string' && data.customer_email) ||
+      (typeof data.customer === 'object' && data.customer !== null && typeof (data.customer as Record<string, unknown>).email === 'string'
+        ? ((data.customer as Record<string, unknown>).email as string)
+        : '') ||
       '';
+    const normalizedCustomerEmail = customerEmail.trim().toLowerCase();
 
     let tx:
       | {
@@ -97,11 +150,11 @@ export async function POST(req: Request) {
       }
     }
 
-    if (!tx && customerEmail && Number.isFinite(amountFromWebhook) && amountFromWebhook > 0) {
+    if (!tx && normalizedCustomerEmail && Number.isFinite(amountFromWebhook) && amountFromWebhook > 0) {
       const { data: profile } = await admin
         .from('profiles')
         .select('id')
-        .eq('email', customerEmail)
+        .ilike('email', normalizedCustomerEmail)
         .maybeSingle();
 
       if (profile?.id) {
