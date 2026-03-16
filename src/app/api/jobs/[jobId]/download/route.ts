@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
+import AdmZip from 'adm-zip';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { corsHeaders } from '@/lib/cors';
+import { normalizeRepoSlug, splitRepoSlug } from '@/lib/github/repo';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const BUILDER_REPO_URL = process.env.BUILDER_REPO_URL || '';
@@ -21,13 +23,26 @@ function parseMeta(value: string | null): ArtifactMeta {
   }
 }
 
-function splitRepo(repo: string) {
-  const [owner, name] = repo.split('/');
-  return { owner, name };
-}
-
 export async function OPTIONS() {
   return NextResponse.json({}, { headers: corsHeaders() });
+}
+
+function sanitizeFilePart(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function buildDownloadFileName(params: {
+  packageName: string;
+  versionName: string;
+  fileType: 'apk' | 'aab';
+}) {
+  const packageName = sanitizeFilePart(params.packageName || 'app');
+  const versionName = sanitizeFilePart(params.versionName || '1.0.0');
+  return `${packageName}-${versionName}-${params.fileType}-apeka.dev.${params.fileType}`;
 }
 
 export async function GET(req: Request, { params }: { params: Promise<{ jobId: string }> }) {
@@ -35,7 +50,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
     const { jobId } = await params;
     const url = new URL(req.url);
     const userId = url.searchParams.get('userId');
-    const fileType = url.searchParams.get('fileType') ?? 'apk';
+    const fileTypeParam = url.searchParams.get('fileType') ?? 'apk';
+    const fileType: 'apk' | 'aab' = fileTypeParam === 'aab' ? 'aab' : 'apk';
     const signed = url.searchParams.get('signed') !== 'false';
 
     if (!userId) {
@@ -45,7 +61,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
     const admin = createAdminClient();
     const { data: job, error: jobError } = await admin
       .from('jobs')
-      .select('id,user_id,status,apk_url,signed_apk_url,expires_at')
+      .select('id,user_id,status,apk_url,signed_apk_url,expires_at,package_name,version_name')
       .eq('id', jobId)
       .eq('user_id', userId)
       .single();
@@ -73,15 +89,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
       return NextResponse.json({ error: 'Artifact metadata missing' }, { status: 400, headers: corsHeaders() });
     }
 
-    const repo = signed ? SIGNER_REPO_URL : BUILDER_REPO_URL;
-    if (!repo || !GITHUB_TOKEN) {
+    const repoRaw = signed ? SIGNER_REPO_URL : BUILDER_REPO_URL;
+    const repoSlug = normalizeRepoSlug(repoRaw);
+    if (!repoSlug || !GITHUB_TOKEN) {
       return NextResponse.json({
-        error: 'GitHub download env not configured',
+        error: `GitHub download env not configured (repo=${repoRaw || 'empty'})`,
         artifact: { runId, artifactName, signed },
       }, { status: 500, headers: corsHeaders() });
     }
 
-    const { owner, name } = splitRepo(repo);
+    const { owner, name } = splitRepoSlug(repoSlug);
     const listArtifactsUrl = `https://api.github.com/repos/${owner}/${name}/actions/runs/${runId}/artifacts`;
     const listRes = await fetch(listArtifactsUrl, {
       headers: {
@@ -92,7 +109,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
 
     if (!listRes.ok) {
       const text = await listRes.text();
-      return NextResponse.json({ error: `Failed to list artifacts: ${text}` }, { status: 500, headers: corsHeaders() });
+      return NextResponse.json(
+        { error: `Failed to list artifacts: ${text}`, repo: repoSlug, runId, artifactName },
+        { status: 500, headers: corsHeaders() },
+      );
     }
 
     const listData = (await listRes.json()) as {
@@ -111,15 +131,41 @@ export async function GET(req: Request, { params }: { params: Promise<{ jobId: s
       },
     });
 
-    if (!downloadRes.ok || !downloadRes.body) {
+    if (!downloadRes.ok) {
       const text = await downloadRes.text();
       return NextResponse.json({ error: `Failed to download artifact: ${text}` }, { status: 500, headers: corsHeaders() });
     }
 
-    const res = new NextResponse(downloadRes.body, {
+    const archiveBuffer = Buffer.from(await downloadRes.arrayBuffer());
+    const zip = new AdmZip(archiveBuffer);
+    const entries = zip.getEntries();
+    const expectedExtension = fileType === 'aab' ? '.aab' : '.apk';
+    const artifactEntry = entries.find((entry: { isDirectory: boolean; entryName: string }) => {
+      return !entry.isDirectory && entry.entryName.toLowerCase().endsWith(expectedExtension);
+    });
+
+    if (!artifactEntry) {
+      return NextResponse.json(
+        { error: `Artifact file ${expectedExtension} not found in archive` },
+        { status: 404, headers: corsHeaders() },
+      );
+    }
+
+    const fileBuffer = artifactEntry.getData();
+    const fileArrayBuffer = fileBuffer.buffer.slice(
+      fileBuffer.byteOffset,
+      fileBuffer.byteOffset + fileBuffer.byteLength,
+    ) as ArrayBuffer;
+    const downloadName = buildDownloadFileName({
+      packageName: job.package_name,
+      versionName: job.version_name,
+      fileType,
+    });
+
+    const res = new NextResponse(fileArrayBuffer, {
       headers: {
-        'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${artifactName}.zip"`,
+        'Content-Type': fileType === 'aab' ? 'application/octet-stream' : 'application/vnd.android.package-archive',
+        'Content-Disposition': `attachment; filename="${downloadName}"`,
         'Cache-Control': 'private, no-store, max-age=0',
       },
     });

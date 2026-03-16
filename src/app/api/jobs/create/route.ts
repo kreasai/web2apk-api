@@ -1,37 +1,13 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient, getPricingMap } from '@/lib/supabase/admin';
 import { corsHeaders } from '@/lib/cors';
+import { normalizeRepoSlug } from '@/lib/github/repo';
 
 const BUILDER_REPO_URL = process.env.BUILDER_REPO_URL || '';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const BUILDER_WORKFLOW_FILE = process.env.BUILDER_WORKFLOW_FILE || 'android-build.yml';
 const BUILDER_WORKFLOW_REF = process.env.BUILDER_WORKFLOW_REF || 'main';
 const WEB2APK_CALLBACK_TOKEN = process.env.WEB2APK_CALLBACK_TOKEN || '';
-
-function normalizeRepoSlug(value: string) {
-  const raw = value.trim().replace(/\.git$/, '');
-  if (!raw) return '';
-
-  if (raw.startsWith('http://') || raw.startsWith('https://')) {
-    try {
-      const url = new URL(raw);
-      const parts = url.pathname.split('/').filter(Boolean);
-      if (parts.length >= 2) {
-        return `${parts[0]}/${parts[1]}`;
-      }
-      return '';
-    } catch {
-      return '';
-    }
-  }
-
-  const parts = raw.split('/').filter(Boolean);
-  if (parts.length >= 2) {
-    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
-  }
-
-  return '';
-}
 
 function resolveCallbackUrl(req: Request) {
   const configured = process.env.WEB2APK_CALLBACK_URL;
@@ -166,6 +142,11 @@ export async function POST(req: Request) {
     const effectiveSplashBackgroundColor = splashBackgroundColor ?? existingApp?.splash_background_color ?? '#0B1220';
     const effectiveJobFeatures = {
       ...effectiveFeatures,
+      enable_swipe_refresh: Boolean(effectiveFeatures.swipeRefresh ?? true),
+      enable_external_apps: true,
+      enable_offline_page: Boolean(effectiveFeatures.offlinePage ?? true),
+      enable_back_navigation: true,
+      enable_splash: Boolean(effectiveSplashPath || effectiveIconPath),
       splash_background_color: effectiveSplashBackgroundColor,
       __icon_path: effectiveIconPath ?? '',
       __splash_path: effectiveSplashPath ?? '',

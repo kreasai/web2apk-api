@@ -1,17 +1,13 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient, getPricingMap } from '@/lib/supabase/admin';
 import { corsHeaders } from '@/lib/cors';
+import { normalizeRepoSlug, splitRepoSlug } from '@/lib/github/repo';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const SIGNER_REPO_URL = process.env.SIGNER_REPO_URL || '';
 const BUILDER_REPO_URL = process.env.BUILDER_REPO_URL || '';
 const SIGNER_WORKFLOW_FILE = process.env.SIGNER_WORKFLOW_FILE || 'sign-release.yml';
 const WEB2APK_CALLBACK_TOKEN = process.env.WEB2APK_CALLBACK_TOKEN || '';
-
-function splitRepo(repo: string) {
-  const [owner, name] = repo.split('/');
-  return { owner, name };
-}
 
 function resolveCallbackUrl(req: Request) {
   const configured = process.env.WEB2APK_CALLBACK_URL;
@@ -69,7 +65,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ jobId: 
       return NextResponse.json({ error: 'Insufficient credits for signing' }, { status: 402, headers: corsHeaders() });
     }
 
-    if (!SIGNER_REPO_URL || !BUILDER_REPO_URL || !GITHUB_TOKEN) {
+    const signerRepoSlug = normalizeRepoSlug(SIGNER_REPO_URL);
+    const builderRepoSlug = normalizeRepoSlug(BUILDER_REPO_URL);
+
+    if (!signerRepoSlug || !builderRepoSlug || !GITHUB_TOKEN) {
       return NextResponse.json({ error: 'Signer dispatch env not configured' }, { status: 500, headers: corsHeaders() });
     }
 
@@ -89,8 +88,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ jobId: 
       return NextResponse.json({ error: 'Builder artifact metadata missing' }, { status: 400, headers: corsHeaders() });
     }
 
-    const signerDispatch = `https://api.github.com/repos/${SIGNER_REPO_URL}/actions/workflows/${SIGNER_WORKFLOW_FILE}/dispatches`;
-    const builderSplit = splitRepo(BUILDER_REPO_URL);
+    const signerDispatch = `https://api.github.com/repos/${signerRepoSlug}/actions/workflows/${SIGNER_WORKFLOW_FILE}/dispatches`;
+    const builderSplit = splitRepoSlug(builderRepoSlug);
     const callbackUrl = resolveCallbackUrl(req);
 
     const baseInputs = {
